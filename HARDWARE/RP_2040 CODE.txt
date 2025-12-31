@@ -1,0 +1,427 @@
+#include <WiFiNINA.h>
+#include <WiFiSSLClient.h>
+#include <Arduino_LSM6DSOX.h>
+#include <PDM.h>
+
+#include <WiFiUdp.h>
+#include <NTPClient.h>
+
+char ssid[] = "WE_ABE30";
+char pass[] = "S@saeed@30S";
+
+String projectID = "graduation2-75f83";
+String idToken = "";
+String host = "";
+
+const int sampleBufferSize = 1024;
+short sampleBuffer[sampleBufferSize];
+volatile int samplesRead = 0;
+
+float vibMagnitude = 0;
+int temperatureDeg = 0;
+float micLevel = 0;
+
+float audioRMS = 0;
+float audioPeak = 0;
+float audioZCR = 0;
+float audioSpectralCentroid = 0;
+float audioMFCC1 = 0;
+float audioMFCC2 = 0;
+float audioMFCC3 = 0;
+float audioMFCC4 = 0;
+
+float vibRMS_X = 0;
+float vibRMS_Y = 0;
+float vibRMS_Z = 0;
+float vibMagnitudeFeature = 0;
+float vibStdDev = 0;
+
+float tempCurrent = 0;
+float tempMovingAverage = 0;
+float tempDerivative = 0;
+float tempStdDev = 0;
+
+const int timeSeriesSize = 30;
+float tempHistory[timeSeriesSize] = {0};
+float vibMagnitudeHistory[timeSeriesSize] = {0};
+int historyIndex = 0;
+int sampleCount = 0;
+
+const int fftSize = 256;
+float fftBuffer[fftSize];
+
+WiFiSSLClient client;
+
+WiFiUDP ntpUDP;  
+NTPClient timeClient(ntpUDP, "time.google.com", 7200, 60000);
+
+void onPDMData() {
+  samplesRead = PDM.read(sampleBuffer, sampleBufferSize);
+}
+
+void simpleFFT(float* input, float* output, int n) {
+  for (int k = 0; k < n/2; k++) {
+    float real = 0;
+    float imag = 0;
+    
+    for (int t = 0; t < n; t++) {
+      float angle = 2 * PI * k * t / n;
+      real += input[t] * cos(angle);
+      imag += input[t] * sin(angle);
+    }
+    output[k] = sqrt(real*real + imag*imag);
+  }
+}
+
+void calculateAudioFeatures() {
+  if (samplesRead <= 0) return;
+  
+  int numSamples = min(samplesRead, fftSize);
+  
+  float sumSquares = 0;
+  float peak = 0;
+  int zeroCrossings = 0;
+  
+  long rawSum = 0;
+  for (int i = 0; i < samplesRead; i++) {
+    rawSum += (long)sampleBuffer[i] * sampleBuffer[i];
+  }
+  micLevel = sqrt(rawSum / (float)samplesRead);
+  
+  for (int i = 0; i < numSamples; i++) {
+    float sample = sampleBuffer[i] / 32768.0f;
+    fftBuffer[i] = sample;
+    sumSquares += sample * sample;
+    
+    float absSample = sample < 0 ? -sample : sample;
+    if (absSample > peak) peak = absSample;
+    
+    if (i > 0) {
+      if ((sampleBuffer[i-1] >= 0 && sampleBuffer[i] < 0) || 
+          (sampleBuffer[i-1] < 0 && sampleBuffer[i] >= 0)) {
+        zeroCrossings++;
+      }
+    }
+  }
+  
+  audioRMS = sqrt(sumSquares / (float)numSamples);
+  audioPeak = peak;
+  audioZCR = (float)zeroCrossings / (numSamples - 1);
+  
+  float spectrum[fftSize/2];
+  simpleFFT(fftBuffer, spectrum, numSamples);
+  
+  float spectralSum = 0;
+  float spectralWeightedSum = 0;
+  
+  for (int i = 0; i < fftSize/2; i++) {
+    spectralWeightedSum += spectrum[i] * i;
+    spectralSum += spectrum[i];
+  }
+  
+  audioSpectralCentroid = spectralSum > 0 ? spectralWeightedSum / spectralSum : 0;
+  
+  float melBands[4] = {0};
+  for (int i = 0; i < 4; i++) {
+    int startBin = i * (fftSize/8);
+    int endBin = (i + 1) * (fftSize/8);
+    for (int j = startBin; j < endBin; j++) {
+      melBands[i] += spectrum[j];
+    }
+    melBands[i] = log(melBands[i] + 1e-6f);
+  }
+  
+  audioMFCC1 = 0; audioMFCC2 = 0; audioMFCC3 = 0; audioMFCC4 = 0;
+  for (int i = 0; i < 4; i++) {
+    float coeff = 0;
+    for (int j = 0; j < 4; j++) {
+      coeff += melBands[j] * cos(PI * i * (j + 0.5f) / 4);
+    }
+    if (i == 0) audioMFCC1 = coeff;
+    else if (i == 1) audioMFCC2 = coeff;
+    else if (i == 2) audioMFCC3 = coeff;
+    else if (i == 3) audioMFCC4 = coeff;
+  }
+  
+  samplesRead = 0;
+}
+
+void calculateVibrationFeatures() {
+  float x, y, z;
+  if (IMU.accelerationAvailable()) {
+    IMU.readAcceleration(x, y, z);
+    
+    vibMagnitude = sqrt(x * x + y * y + z * z);
+    vibMagnitudeFeature = vibMagnitude;
+    
+    vibRMS_X = abs(x);
+    vibRMS_Y = abs(y);
+    vibRMS_Z = abs(z);
+    
+    vibMagnitudeHistory[historyIndex] = vibMagnitudeFeature;
+    
+    int count = min(sampleCount + 1, timeSeriesSize);
+    
+    float sum = 0;
+    for (int i = 0; i < count; i++) {
+      sum += vibMagnitudeHistory[i];
+    }
+    float mean = sum / count;
+    
+    float variance = 0;
+    for (int i = 0; i < count; i++) {
+      float diff = vibMagnitudeHistory[i] - mean;
+      variance += diff * diff;
+    }
+    vibStdDev = sqrt(variance / count);
+  }
+}
+
+void calculateTemperatureFeatures() {
+  static float prevTemp = 0;
+  static bool firstRead = true;
+  
+  if (IMU.temperatureAvailable()) {
+    IMU.readTemperature(temperatureDeg);
+    tempCurrent = (float)temperatureDeg;
+    
+    tempHistory[historyIndex] = tempCurrent;
+    
+    if (!firstRead) {
+      tempDerivative = tempCurrent - prevTemp;
+    } else {
+      tempDerivative = 0;
+      firstRead = false;
+    }
+    prevTemp = tempCurrent;
+    
+    int count = min(sampleCount + 1, timeSeriesSize);
+    
+    float sum = 0;
+    for (int i = 0; i < count; i++) {
+      sum += tempHistory[i];
+    }
+    tempMovingAverage = sum / count;
+    
+    float variance = 0;
+    for (int i = 0; i < count; i++) {
+      float diff = tempHistory[i] - tempMovingAverage;
+      variance += diff * diff;
+    }
+    tempStdDev = sqrt(variance / count);
+  }
+}
+
+void readAllSensorsAndFeatures() {
+  calculateAudioFeatures();
+  calculateVibrationFeatures();
+  calculateTemperatureFeatures();
+  
+  historyIndex = (historyIndex + 1) % timeSeriesSize;
+  if (sampleCount < timeSeriesSize) sampleCount++;
+}
+
+String getTimestamp() {
+  timeClient.update();
+  unsigned long epoch = timeClient.getEpochTime();
+
+  unsigned long SECS_PER_DAY = 86400UL;
+  unsigned long SECS_PER_HOUR = 3600UL;
+  unsigned long SECS_PER_MIN = 60UL;
+
+  unsigned long days = epoch / SECS_PER_DAY;
+  unsigned long remaining = epoch % SECS_PER_DAY;
+
+  int hour = remaining / SECS_PER_HOUR;
+  remaining %= SECS_PER_HOUR;
+
+  int minute = remaining / SECS_PER_MIN;
+  int second = remaining % SECS_PER_MIN;
+
+  int year = 1970;
+  while (true) {
+    bool leap = (year % 4 == 0 && year % 100 != 0) || (year % 400 == 0);
+    int daysInYear = leap ? 366 : 365;
+
+    if (days >= daysInYear) {
+      days -= daysInYear;
+      year++;
+    } else {
+      break;
+    }
+  }
+
+  int monthDays[] = {31, 28, 31, 30, 31, 30, 31, 31, 30, 31, 30, 31};
+  bool leapThisYear = (year % 4 == 0 && year % 100 != 0) || (year % 400 == 0);
+  if (leapThisYear) monthDays[1] = 29;
+
+  int month = 0;
+  while (days >= monthDays[month]) {
+    days -= monthDays[month];
+    month++;
+  }
+
+  int day = days + 1;
+  int realMonth = month + 1;
+
+  char buffer[30];
+  sprintf(buffer, "%04d-%02d-%02d %02d:%02d:%02d",
+          year, realMonth, day, hour, minute, second);
+
+  return String(buffer);
+}
+
+bool ensureConnection() {
+  if (client.connected()) {
+    return true;
+  }
+  return client.connect(host.c_str(), 443);
+}
+
+void sendRequest(String path, String jsonData) {
+  String req =
+    "POST " + path + " HTTP/1.1\r\n"
+    "Host: " + host + "\r\n"
+    "Connection: keep-alive\r\n"
+    "Content-Type: application/json\r\n"
+    "Content-Length: " + String(jsonData.length()) + "\r\n\r\n" +
+    jsonData;
+
+  client.print(req);
+  
+  unsigned long timeout = millis() + 500;
+  while (millis() < timeout) {
+    while (client.available()) {
+      client.read();
+    }
+    if (!client.available()) break;
+  }
+}
+
+void sendAllDataToFirebase() {
+  if (!ensureConnection()) {
+    if (Serial) Serial.println("Firebase connection failed!");
+    return;
+  }
+
+  String timestamp = getTimestamp();
+
+  String json1 = "{";
+  json1 += "\"temperature\":" + String(temperatureDeg) + ",";
+  json1 += "\"vibration\":" + String(vibMagnitude, 4) + ",";
+  json1 += "\"sound\":" + String(micLevel, 4) + ",";
+  json1 += "\"timestamp\":\"" + timestamp + "\"";
+  json1 += "}";
+  sendRequest("/sensorData.json?auth=" + idToken, json1);
+
+  String json2 = "{";
+  json2 += "\"timestamp\":\"" + timestamp + "\",";
+  json2 += "\"audioMFCC1\":" + String(audioMFCC1, 6) + ",";
+  json2 += "\"audioMFCC2\":" + String(audioMFCC2, 6) + ",";
+  json2 += "\"audioMFCC3\":" + String(audioMFCC3, 6) + ",";
+  json2 += "\"audioMFCC4\":" + String(audioMFCC4, 6) + ",";
+  json2 += "\"audioPeak\":" + String(audioPeak, 6) + ",";
+  json2 += "\"audioRMS\":" + String(audioRMS, 6) + ",";
+  json2 += "\"audioSpectralCentroid\":" + String(audioSpectralCentroid, 6) + ",";
+  json2 += "\"audioZCR\":" + String(audioZCR, 6);
+  json2 += "}";
+  sendRequest("/soundSensorDataFeatures.json?auth=" + idToken, json2);
+
+  String json3 = "{";
+  json3 += "\"timestamp\":\"" + timestamp + "\",";
+  json3 += "\"tempCurrent\":" + String(tempCurrent, 2) + ",";
+  json3 += "\"tempDerivative\":" + String(tempDerivative, 2) + ",";
+  json3 += "\"tempMovingAverage\":" + String(tempMovingAverage, 2) + ",";
+  json3 += "\"tempStdDev\":" + String(tempStdDev, 4);
+  json3 += "}";
+  sendRequest("/tempSensorDataFeatures.json?auth=" + idToken, json3);
+
+  String json4 = "{";
+  json4 += "\"timestamp\":\"" + timestamp + "\",";
+  json4 += "\"vibMagnitude\":" + String(vibMagnitudeFeature, 6) + ",";
+  json4 += "\"vibRMS_X\":" + String(vibRMS_X, 6) + ",";
+  json4 += "\"vibRMS_Y\":" + String(vibRMS_Y, 6) + ",";
+  json4 += "\"vibRMS_Z\":" + String(vibRMS_Z, 6) + ",";
+  json4 += "\"vibStdDev\":" + String(vibStdDev, 6);
+  json4 += "}";
+  sendRequest("/vibrationSensorDataFeatures.json?auth=" + idToken, json4);
+
+  if (Serial) Serial.println("All data sent!");
+}
+
+void setup() {
+  if (Serial) Serial.begin(115200);
+  delay(500);
+
+  host = projectID + "-default-rtdb.firebaseio.com";
+
+  WiFi.begin(ssid, pass);
+  unsigned long startAttempt = millis();
+
+  while (WiFi.status() != WL_CONNECTED) {
+    if (millis() - startAttempt > 10000) {
+      if (Serial) Serial.println("WiFi failed! Rebooting...");
+      delay(2000);
+      NVIC_SystemReset();
+    }
+    delay(500);
+  }
+  if (Serial) Serial.println("WiFi Connected!");
+
+  timeClient.begin();
+  if (Serial) Serial.print("Syncing time...");
+
+  while (!timeClient.update()) {
+    timeClient.forceUpdate();
+    if (Serial) Serial.print(".");
+    delay(500);
+  }
+  if (Serial) Serial.println("\nTime synced!");
+
+  if (!IMU.begin()) {
+   if (Serial) Serial.println("Failed to init IMU!");
+   while (1);
+  }
+
+  if (!PDM.begin(1, 16000)) {
+    if (Serial) Serial.println("Failed to start mic!");
+    while (1);
+  }
+  
+  PDM.setBufferSize(sampleBufferSize * sizeof(short));
+  PDM.onReceive(onPDMData);
+
+  if (Serial) Serial.println("System Ready! (Reduced Features v2)");
+}
+
+void loop() {
+  unsigned long startTime = millis();
+  
+  readAllSensorsAndFeatures();
+
+  if (Serial) {
+    Serial.print("TEMP: ");
+    Serial.print(temperatureDeg);
+    Serial.print("C | VIB: ");
+    Serial.print(vibMagnitude, 4);
+    Serial.print("g | MIC: ");
+    Serial.print(micLevel);
+    Serial.print(" | audioRMS: ");
+    Serial.print(audioRMS, 6);
+    Serial.print(" | tempStdDev: ");
+    Serial.println(tempStdDev, 4);
+  }
+
+  sendAllDataToFirebase();
+
+  unsigned long elapsed = millis() - startTime;
+  if (Serial) {
+    Serial.print("Cycle time: ");
+    Serial.print(elapsed);
+    Serial.println("ms\n");
+  }
+  
+  if (elapsed < 1000) {
+    delay(1000 - elapsed);
+  }
+}
