@@ -6,8 +6,8 @@
 #include <WiFiUdp.h>
 #include <NTPClient.h>
 
-char ssid[] = "WE_ABE30";
-char pass[] = "S@saeed@30S";
+char ssid[] = "";
+char pass[] = "";
 
 String projectID = "graduation2-75f83";
 String idToken = "";
