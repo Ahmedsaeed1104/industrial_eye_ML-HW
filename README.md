@@ -51,10 +51,12 @@ Industrial Eye is an IoT-based predictive maintenance system that monitors indus
 | Parameter | Value |
 |-----------|-------|
 | Sample Rate | 16000 Hz (16 kHz) |
-| Channels | 1 (Mono) |
 | Buffer Size | 1024 samples |
+| Collection window | 64 ms |
+| Channels | 1 (Mono) |
 | Data Type | 16-bit signed integer |
 | FFT Size | 256 samples |
+| Analysis window (FFT) | 16 m |
 
 ### Timing & Performance
 | Parameter | Value |
