@@ -178,7 +178,9 @@ These parameters are configured by the user through the mobile application inter
 | Training Time | 5, 15, 30, 60, 120 minutes | Duration for data collection before training |
 | Threshold | 90%, 93%, 95%, 97%, 99% | Anomaly detection sensitivity |
 | Epochs | 50, 100, 150, 200 | Number of training iterations |
-| Batch Size | 4, 8, 16, 32 | Samples per training batch |
+| Batch Size | 4, 8, 16, 32, 64 | Samples per training batch |
+| use_data_augmentation | True, False | Enable Gaussian noise augmentation |
+| use_early_stopping | True, False | Stop training when no improvement |
 
 ### Advanced Parameters (via Firebase Console)
 
