@@ -1,64 +1,92 @@
 #include <WiFiNINA.h>
 #include <WiFiSSLClient.h>
-#include <Arduino_LSM6DSOX.h>
+#include <Arduino_LSM6DSOX.h>  
 #include <PDM.h>
 
 #include <WiFiUdp.h>
 #include <NTPClient.h>
 
+// ---- WiFi ----
 char ssid[] = "";
 char pass[] = "";
-
+// ---- Firebase ----
 String projectID = "graduation2-75f83";
 String idToken = "";
 String host = "";
 
-const int sampleBufferSize = 1024;
+// ---- MIC CONFIG ----
+const int sampleBufferSize = 1024;  // Keep at 1024 (memory safe)
 short sampleBuffer[sampleBufferSize];
 volatile int samplesRead = 0;
 
+// ---- SENSOR VARIABLES ----
 float vibMagnitude = 0;
 int temperatureDeg = 0;
 float micLevel = 0;
 
+// ---- AUDIO FEATURES (INDUSTRIAL-GRADE: 16 features) ----
 float audioRMS = 0;
 float audioPeak = 0;
-float audioZCR = 0;
+float audioEnergy = 0;
 float audioSpectralCentroid = 0;
+float audioSpectralFlatness = 0;
+float audioSpectralBandwidth = 0;
+float audioSpectralRolloff = 0;
+float audioCrestFactor = 0;
 float audioMFCC1 = 0;
 float audioMFCC2 = 0;
 float audioMFCC3 = 0;
 float audioMFCC4 = 0;
+float audioMFCC5 = 0;
+float audioMFCC6 = 0;
+float audioMFCC7 = 0;
+float audioMFCC8 = 0;
 
+// ---- VIBRATION FEATURES (REDUCED: 5 features) ----
+// Kept: vibMagnitude, vibRMS_X, vibRMS_Y, vibRMS_Z, vibStdDev
+// Removed: vibMovingAverage, vibPeak, vibFrequencyPeak
 float vibRMS_X = 0;
 float vibRMS_Y = 0;
 float vibRMS_Z = 0;
 float vibMagnitudeFeature = 0;
 float vibStdDev = 0;
 
+// ---- TEMPERATURE FEATURES (REDUCED: 4 features) ----
+// Kept: tempCurrent, tempDerivative, tempMovingAverage, tempStdDev
+// Removed: tempStability
 float tempCurrent = 0;
 float tempMovingAverage = 0;
 float tempDerivative = 0;
 float tempStdDev = 0;
 
-const int timeSeriesSize = 30;
+// Time Series Buffers
+const int timeSeriesSize = 30;  // Increased from 20, but safe for memory
 float tempHistory[timeSeriesSize] = {0};
 float vibMagnitudeHistory[timeSeriesSize] = {0};
 int historyIndex = 0;
 int sampleCount = 0;
 
-const int fftSize = 256;
+// FFT buffers for frequency analysis
+const int fftSize = 256;  // Keep at 256 (memory safe)
 float fftBuffer[fftSize];
 
+// ---- CLIENT ----
 WiFiSSLClient client;
 
+// ---- NTP CLIENT ----
 WiFiUDP ntpUDP;  
 NTPClient timeClient(ntpUDP, "time.google.com", 7200, 60000);
 
+// -----------------------------------------------------------------------------
+// MIC CALLBACK
+// -----------------------------------------------------------------------------
 void onPDMData() {
   samplesRead = PDM.read(sampleBuffer, sampleBufferSize);
 }
 
+// -----------------------------------------------------------------------------
+// FFT SIMPLE IMPLEMENTATION
+// -----------------------------------------------------------------------------
 void simpleFFT(float* input, float* output, int n) {
   for (int k = 0; k < n/2; k++) {
     float real = 0;
@@ -73,6 +101,9 @@ void simpleFFT(float* input, float* output, int n) {
   }
 }
 
+// -----------------------------------------------------------------------------
+// CALCULATE AUDIO FEATURES (INDUSTRIAL-GRADE - 16 features)
+// -----------------------------------------------------------------------------
 void calculateAudioFeatures() {
   if (samplesRead <= 0) return;
   
@@ -80,14 +111,15 @@ void calculateAudioFeatures() {
   
   float sumSquares = 0;
   float peak = 0;
-  int zeroCrossings = 0;
   
+  // Calculate basic mic level (RMS of raw samples)
   long rawSum = 0;
   for (int i = 0; i < samplesRead; i++) {
     rawSum += (long)sampleBuffer[i] * sampleBuffer[i];
   }
   micLevel = sqrt(rawSum / (float)samplesRead);
   
+  // Normalize and prepare FFT buffer
   for (int i = 0; i < numSamples; i++) {
     float sample = sampleBuffer[i] / 32768.0f;
     fftBuffer[i] = sample;
@@ -95,71 +127,109 @@ void calculateAudioFeatures() {
     
     float absSample = sample < 0 ? -sample : sample;
     if (absSample > peak) peak = absSample;
-    
-    if (i > 0) {
-      if ((sampleBuffer[i-1] >= 0 && sampleBuffer[i] < 0) || 
-          (sampleBuffer[i-1] < 0 && sampleBuffer[i] >= 0)) {
-        zeroCrossings++;
-      }
-    }
   }
   
+  // Basic time-domain features
   audioRMS = sqrt(sumSquares / (float)numSamples);
   audioPeak = peak;
-  audioZCR = (float)zeroCrossings / (numSamples - 1);
+  audioEnergy = sumSquares;
+  audioCrestFactor = audioRMS > 0 ? audioPeak / audioRMS : 0;
   
-  float spectrum[fftSize/2];
+  // Frequency analysis using simple FFT
+  float spectrum[fftSize/2];  // 128 bins
   simpleFFT(fftBuffer, spectrum, numSamples);
   
+  // Spectral statistics
   float spectralSum = 0;
   float spectralWeightedSum = 0;
+  float logSum = 0;
+  float totalEnergy = 0;
   
   for (int i = 0; i < fftSize/2; i++) {
     spectralWeightedSum += spectrum[i] * i;
     spectralSum += spectrum[i];
+    totalEnergy += spectrum[i] * spectrum[i];
+    logSum += log(spectrum[i] + 1e-10f);
   }
   
+  // Spectral Centroid
   audioSpectralCentroid = spectralSum > 0 ? spectralWeightedSum / spectralSum : 0;
   
-  float melBands[4] = {0};
-  for (int i = 0; i < 4; i++) {
-    int startBin = i * (fftSize/8);
-    int endBin = (i + 1) * (fftSize/8);
+  // Spectral Flatness (geometric mean / arithmetic mean)
+  float arithmeticMean = spectralSum / (fftSize/2);
+  float geometricMean = exp(logSum / (fftSize/2));
+  audioSpectralFlatness = arithmeticMean > 0 ? geometricMean / arithmeticMean : 0;
+  
+  // Spectral Bandwidth (weighted std deviation from centroid)
+  float bandwidthSum = 0;
+  for (int i = 0; i < fftSize/2; i++) {
+    float diff = i - audioSpectralCentroid;
+    bandwidthSum += spectrum[i] * diff * diff;
+  }
+  audioSpectralBandwidth = spectralSum > 0 ? sqrt(bandwidthSum / spectralSum) : 0;
+  
+  // Spectral Rolloff (frequency where 85% of energy accumulates)
+  float energyThreshold = totalEnergy * 0.85f;
+  float cumulativeEnergy = 0;
+  audioSpectralRolloff = fftSize/2 - 1;
+  for (int i = 0; i < fftSize/2; i++) {
+    cumulativeEnergy += spectrum[i] * spectrum[i];
+    if (cumulativeEnergy >= energyThreshold) {
+      audioSpectralRolloff = i;
+      break;
+    }
+  }
+  
+  // MFCC with 8 mel bands and 8 coefficients
+  float melBands[8] = {0};
+  for (int i = 0; i < 8; i++) {
+    int startBin = i * (fftSize/16);
+    int endBin = (i + 1) * (fftSize/16);
     for (int j = startBin; j < endBin; j++) {
       melBands[i] += spectrum[j];
     }
     melBands[i] = log(melBands[i] + 1e-6f);
   }
   
-  audioMFCC1 = 0; audioMFCC2 = 0; audioMFCC3 = 0; audioMFCC4 = 0;
-  for (int i = 0; i < 4; i++) {
-    float coeff = 0;
-    for (int j = 0; j < 4; j++) {
-      coeff += melBands[j] * cos(PI * i * (j + 0.5f) / 4);
+  // DCT for 8 MFCC coefficients
+  float mfccCoeffs[8] = {0};
+  for (int i = 0; i < 8; i++) {
+    for (int j = 0; j < 8; j++) {
+      mfccCoeffs[i] += melBands[j] * cos(PI * i * (j + 0.5f) / 8);
     }
-    if (i == 0) audioMFCC1 = coeff;
-    else if (i == 1) audioMFCC2 = coeff;
-    else if (i == 2) audioMFCC3 = coeff;
-    else if (i == 3) audioMFCC4 = coeff;
   }
+  
+  audioMFCC1 = mfccCoeffs[0];
+  audioMFCC2 = mfccCoeffs[1];
+  audioMFCC3 = mfccCoeffs[2];
+  audioMFCC4 = mfccCoeffs[3];
+  audioMFCC5 = mfccCoeffs[4];
+  audioMFCC6 = mfccCoeffs[5];
+  audioMFCC7 = mfccCoeffs[6];
+  audioMFCC8 = mfccCoeffs[7];
   
   samplesRead = 0;
 }
 
+// -----------------------------------------------------------------------------
+// CALCULATE VIBRATION FEATURES (REDUCED - 5 features)
+// -----------------------------------------------------------------------------
 void calculateVibrationFeatures() {
   float x, y, z;
   if (IMU.accelerationAvailable()) {
     IMU.readAcceleration(x, y, z);
     
+    // Core features (KEPT)
     vibMagnitude = sqrt(x * x + y * y + z * z);
     vibMagnitudeFeature = vibMagnitude;
-    
     vibRMS_X = abs(x);
     vibRMS_Y = abs(y);
     vibRMS_Z = abs(z);
     
+    // Store in history for StdDev calculation
     vibMagnitudeHistory[historyIndex] = vibMagnitudeFeature;
     
+    // Calculate StdDev from history (KEPT)
     int count = min(sampleCount + 1, timeSeriesSize);
     
     float sum = 0;
@@ -174,9 +244,14 @@ void calculateVibrationFeatures() {
       variance += diff * diff;
     }
     vibStdDev = sqrt(variance / count);
+    
+    // REMOVED: vibMovingAverage, vibPeak, vibFrequencyPeak
   }
 }
 
+// -----------------------------------------------------------------------------
+// CALCULATE TEMPERATURE FEATURES (REDUCED - 4 features)
+// -----------------------------------------------------------------------------
 void calculateTemperatureFeatures() {
   static float prevTemp = 0;
   static bool firstRead = true;
@@ -185,8 +260,10 @@ void calculateTemperatureFeatures() {
     IMU.readTemperature(temperatureDeg);
     tempCurrent = (float)temperatureDeg;
     
+    // Store in history
     tempHistory[historyIndex] = tempCurrent;
     
+    // Calculate derivative (KEPT)
     if (!firstRead) {
       tempDerivative = tempCurrent - prevTemp;
     } else {
@@ -195,32 +272,41 @@ void calculateTemperatureFeatures() {
     }
     prevTemp = tempCurrent;
     
+    // Calculate stats from history
     int count = min(sampleCount + 1, timeSeriesSize);
     
     float sum = 0;
     for (int i = 0; i < count; i++) {
       sum += tempHistory[i];
     }
-    tempMovingAverage = sum / count;
+    tempMovingAverage = sum / count;  // KEPT
     
     float variance = 0;
     for (int i = 0; i < count; i++) {
       float diff = tempHistory[i] - tempMovingAverage;
       variance += diff * diff;
     }
-    tempStdDev = sqrt(variance / count);
+    // tempStability = variance / count;  // REMOVED
+    tempStdDev = sqrt(variance / count);  // KEPT
   }
 }
 
+// -----------------------------------------------------------------------------
+// READ ALL SENSORS AND CALCULATE ALL FEATURES
+// -----------------------------------------------------------------------------
 void readAllSensorsAndFeatures() {
   calculateAudioFeatures();
   calculateVibrationFeatures();
   calculateTemperatureFeatures();
   
+  // Update history index AFTER calculations
   historyIndex = (historyIndex + 1) % timeSeriesSize;
   if (sampleCount < timeSeriesSize) sampleCount++;
 }
 
+// -----------------------------------------------------------------------------
+// GET TIMESTAMP (YYYY-MM-DD HH:MM:SS)
+// -----------------------------------------------------------------------------
 String getTimestamp() {
   timeClient.update();
   unsigned long epoch = timeClient.getEpochTime();
@@ -271,6 +357,9 @@ String getTimestamp() {
   return String(buffer);
 }
 
+// -----------------------------------------------------------------------------
+// ENSURE CONNECTION
+// -----------------------------------------------------------------------------
 bool ensureConnection() {
   if (client.connected()) {
     return true;
@@ -278,6 +367,9 @@ bool ensureConnection() {
   return client.connect(host.c_str(), 443);
 }
 
+// -----------------------------------------------------------------------------
+// SEND REQUEST (reuses connection)
+// -----------------------------------------------------------------------------
 void sendRequest(String path, String jsonData) {
   String req =
     "POST " + path + " HTTP/1.1\r\n"
@@ -298,6 +390,9 @@ void sendRequest(String path, String jsonData) {
   }
 }
 
+// -----------------------------------------------------------------------------
+// SEND ALL DATA TO FIREBASE (REDUCED FEATURES)
+// -----------------------------------------------------------------------------
 void sendAllDataToFirebase() {
   if (!ensureConnection()) {
     if (Serial) Serial.println("Firebase connection failed!");
@@ -306,6 +401,7 @@ void sendAllDataToFirebase() {
 
   String timestamp = getTimestamp();
 
+  // 1. sensorData (basic - unchanged)
   String json1 = "{";
   json1 += "\"temperature\":" + String(temperatureDeg) + ",";
   json1 += "\"vibration\":" + String(vibMagnitude, 4) + ",";
@@ -314,19 +410,30 @@ void sendAllDataToFirebase() {
   json1 += "}";
   sendRequest("/sensorData.json?auth=" + idToken, json1);
 
+  // 2. soundSensorDataFeatures (INDUSTRIAL-GRADE: 16 features)
   String json2 = "{";
   json2 += "\"timestamp\":\"" + timestamp + "\",";
   json2 += "\"audioMFCC1\":" + String(audioMFCC1, 6) + ",";
   json2 += "\"audioMFCC2\":" + String(audioMFCC2, 6) + ",";
   json2 += "\"audioMFCC3\":" + String(audioMFCC3, 6) + ",";
   json2 += "\"audioMFCC4\":" + String(audioMFCC4, 6) + ",";
+  json2 += "\"audioMFCC5\":" + String(audioMFCC5, 6) + ",";
+  json2 += "\"audioMFCC6\":" + String(audioMFCC6, 6) + ",";
+  json2 += "\"audioMFCC7\":" + String(audioMFCC7, 6) + ",";
+  json2 += "\"audioMFCC8\":" + String(audioMFCC8, 6) + ",";
   json2 += "\"audioPeak\":" + String(audioPeak, 6) + ",";
   json2 += "\"audioRMS\":" + String(audioRMS, 6) + ",";
+  json2 += "\"audioEnergy\":" + String(audioEnergy, 6) + ",";
   json2 += "\"audioSpectralCentroid\":" + String(audioSpectralCentroid, 6) + ",";
-  json2 += "\"audioZCR\":" + String(audioZCR, 6);
+  json2 += "\"audioSpectralFlatness\":" + String(audioSpectralFlatness, 6) + ",";
+  json2 += "\"audioSpectralBandwidth\":" + String(audioSpectralBandwidth, 6) + ",";
+  json2 += "\"audioSpectralRolloff\":" + String(audioSpectralRolloff, 6) + ",";
+  json2 += "\"audioCrestFactor\":" + String(audioCrestFactor, 6);
   json2 += "}";
   sendRequest("/soundSensorDataFeatures.json?auth=" + idToken, json2);
 
+  // 3. tempSensorDataFeatures (REDUCED: 4 features)
+  // Removed: tempStability
   String json3 = "{";
   json3 += "\"timestamp\":\"" + timestamp + "\",";
   json3 += "\"tempCurrent\":" + String(tempCurrent, 2) + ",";
@@ -336,6 +443,8 @@ void sendAllDataToFirebase() {
   json3 += "}";
   sendRequest("/tempSensorDataFeatures.json?auth=" + idToken, json3);
 
+  // 4. vibrationSensorDataFeatures (REDUCED: 5 features)
+  // Removed: vibMovingAverage, vibPeak, vibFrequencyPeak
   String json4 = "{";
   json4 += "\"timestamp\":\"" + timestamp + "\",";
   json4 += "\"vibMagnitude\":" + String(vibMagnitudeFeature, 6) + ",";
@@ -349,6 +458,9 @@ void sendAllDataToFirebase() {
   if (Serial) Serial.println("All data sent!");
 }
 
+// -----------------------------------------------------------------------------
+// SETUP
+// -----------------------------------------------------------------------------
 void setup() {
   if (Serial) Serial.begin(115200);
   delay(500);
@@ -391,9 +503,12 @@ void setup() {
   PDM.setBufferSize(sampleBufferSize * sizeof(short));
   PDM.onReceive(onPDMData);
 
-  if (Serial) Serial.println("System Ready! (Reduced Features v2)");
+  if (Serial) Serial.println("System Ready! (Industrial-Grade 16 Audio Features)");
 }
 
+// -----------------------------------------------------------------------------
+// LOOP
+// -----------------------------------------------------------------------------
 void loop() {
   unsigned long startTime = millis();
   
