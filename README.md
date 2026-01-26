@@ -81,21 +81,29 @@ All three models use **Autoencoder** architecture for unsupervised anomaly detec
 
 | Parameter | Value |
 |-----------|-------|
-| Input Features | 8 |
-| Hidden Layer | 6 units |
-| Bottleneck | 3 units |
+| Input Features | 16 |
+| Hidden Layer | 12 units |
+| Bottleneck | 6 units |
 | Dropout Rate | 10% |
 
 
-**Input Features:**
+**Input Features (Industrial-Grade):**
 1. `audioMFCC1` - Mel-Frequency Cepstral Coefficient 1
 2. `audioMFCC2` - Mel-Frequency Cepstral Coefficient 2
 3. `audioMFCC3` - Mel-Frequency Cepstral Coefficient 3
 4. `audioMFCC4` - Mel-Frequency Cepstral Coefficient 4
-5. `audioPeak` - Maximum amplitude
-6. `audioRMS` - Root Mean Square
-7. `audioSpectralCentroid` - Center of mass of spectrum
-8. `audioZCR` - Zero Crossing Rate
+5. `audioMFCC5` - Mel-Frequency Cepstral Coefficient 5
+6. `audioMFCC6` - Mel-Frequency Cepstral Coefficient 6
+7. `audioMFCC7` - Mel-Frequency Cepstral Coefficient 7
+8. `audioMFCC8` - Mel-Frequency Cepstral Coefficient 8
+9. `audioPeak` - Maximum amplitude
+10. `audioRMS` - Root Mean Square energy
+11. `audioEnergy` - Total signal energy
+12. `audioSpectralCentroid` - Center of mass of spectrum
+13. `audioSpectralFlatness` - Noise vs tonal indicator
+14. `audioSpectralBandwidth` - Frequency spread measure
+15. `audioSpectralRolloff` - 85% energy accumulation frequency
+16. `audioCrestFactor` - Peak to RMS ratio (dynamics)
 
 ### Temperature Model
 
@@ -141,7 +149,7 @@ All three models use **Autoencoder** architecture for unsupervised anomaly detec
 | Optimizer | Adam |
 | Loss Function | MSE |
 | Data Augmentation | Gaussian noise (1%) |
-| Early Stopping | Configurable |
+| Early Stopping | False |
 
 ---
 
@@ -190,8 +198,8 @@ These parameters can be modified directly in Firebase Firestore for fine-tuning:
 
 | Parameter | Type | Default | Description |
 |-----------|------|---------|-------------|
-| `bottleneck_dim` | number | 2-3 | Autoencoder compression layer size |
-| `hidden_dim` | number | 3-6 | Hidden layer neurons |
+| `bottleneck_dim` | number | 2-6 | Autoencoder compression layer size |
+| `hidden_dim` | number | 3-12 | Hidden layer neurons |
 | `dropout_rate` | number | 0.1-0.15 | Regularization dropout percentage |
 | `learning_rate` | number | 0.001 | Adam optimizer learning rate |
 | `validation_split` | number | 0.15 | Data split for validation |
@@ -213,16 +221,16 @@ These parameters can be modified directly in Firebase Firestore for fine-tuning:
 **Model Config (`{sensor}/config`):**
 ```json
 {
-  "epochs": 100,
+  "epochs": 150,
   "batch_size": 32,
   "threshold_percentile": 95,
-  "bottleneck_dim": 3,
-  "hidden_dim": 6,
+  "bottleneck_dim": 6,
+  "hidden_dim": 12,
   "dropout_rate": 0.1,
   "learning_rate": 0.001,
   "use_data_augmentation": true,
   "use_early_stopping": false,
-  "early_stopping_patience": 10
+  "early_stopping_patience": 50
 }
 ```
 
@@ -270,6 +278,29 @@ Each model generates:
 - `{model}_anomaly_detector.tflite` - Optimized model
 - `{model}_params.json` - Scaler parameters & metrics
 - `visualizations/` - Training plots (ROC, Confusion Matrix, etc.)
+
+---
+
+## � Experimeantal Results
+
+### Test Setup
+- **Equipment:** Household refrigerator
+- **Board Position:** Bottom of refrigerator
+- **Training Durations:** 15 minutes and 30 minutes
+
+### Performance Results (30-Minute Training)
+
+| Model | Reconstruction Accuracy | Normal Detection Rate | Threshold |
+|-------|------------------------|----------------------|-----------|
+| Sound | 87.51% | 95.00% | 0.353143 |
+| Temperature | 76.75% | 94.98% | 1.138560 |
+| Vibration | 49.87% | 94.98% | 2.077293 |
+
+### Anomaly Detection Validation
+All models successfully detected:
+- ✅ **Vibration anomalies** - Shaking the refrigerator
+- ✅ **Temperature anomalies** - Lighter placed near sensor
+- ✅ **Sound anomalies** - Abnormal noises introduced
 
 ---
 
