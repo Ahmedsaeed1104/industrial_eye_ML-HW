@@ -29,8 +29,8 @@ DEFAULT_CONFIG = {
     'batch_size': 32,
     'validation_split': 0.15,
     'threshold_percentile': 95,
-    'bottleneck_dim': 3,
-    'hidden_dim': 6,
+    'bottleneck_dim': 6,
+    'hidden_dim': 12,
     'dropout_rate': 0.1,
     'learning_rate': 0.001,
     'use_data_augmentation': True,
@@ -45,7 +45,7 @@ status_info = {"message": "Waiting for learn=true in Firestore...", "is_training
 class AudioAnomalyDetector:
     def __init__(self, config=None):
         self.config = {**DEFAULT_CONFIG, **(config or {})}
-        self.input_dim = 8
+        self.input_dim = 16
         self.scaler = StandardScaler()
         self.model = None
         self.threshold = None
@@ -65,7 +65,24 @@ class AudioAnomalyDetector:
             print(f"Number of entries: {len(data)}")
             for key, entry in data.items():
                 try:
-                    feature_vector = [float(entry['audioMFCC1']), float(entry['audioMFCC2']), float(entry['audioMFCC3']), float(entry['audioMFCC4']), float(entry['audioPeak']), float(entry['audioRMS']), float(entry['audioSpectralCentroid']), float(entry['audioZCR'])]
+                    feature_vector = [
+                        float(entry['audioMFCC1']),
+                        float(entry['audioMFCC2']),
+                        float(entry['audioMFCC3']),
+                        float(entry['audioMFCC4']),
+                        float(entry['audioMFCC5']),
+                        float(entry['audioMFCC6']),
+                        float(entry['audioMFCC7']),
+                        float(entry['audioMFCC8']),
+                        float(entry['audioPeak']),
+                        float(entry['audioRMS']),
+                        float(entry['audioEnergy']),
+                        float(entry['audioSpectralCentroid']),
+                        float(entry['audioSpectralFlatness']),
+                        float(entry['audioSpectralBandwidth']),
+                        float(entry['audioSpectralRolloff']),
+                        float(entry['audioCrestFactor'])
+                    ]
                     all_features.append(feature_vector)
                 except (KeyError, ValueError):
                     continue
@@ -142,7 +159,9 @@ class AudioAnomalyDetector:
             os.makedirs(output_dir)
         reconstructions = self.model.predict(self.processed_data, verbose=0)
         mse = np.mean(np.power(self.processed_data - reconstructions, 2), axis=1)
-        feature_names = ['MFCC1', 'MFCC2', 'MFCC3', 'MFCC4', 'Peak', 'RMS', 'SpectralCentroid', 'ZCR']
+        feature_names = ['MFCC1', 'MFCC2', 'MFCC3', 'MFCC4', 'MFCC5', 'MFCC6', 'MFCC7', 'MFCC8', 
+                         'Peak', 'RMS', 'Energy', 'SpectralCentroid', 'SpectralFlatness', 
+                         'SpectralBandwidth', 'SpectralRolloff', 'CrestFactor']
         
         fig, axes = plt.subplots(1, 2, figsize=(14, 5))
         axes[0].plot(history.history['loss'], label='Training Loss', linewidth=2, color='#2196F3')
@@ -298,7 +317,7 @@ class AudioAnomalyDetector:
         axes[0].set_xlim(0, 10)
         axes[0].set_ylim(0, 10)
         axes[0].axis('off')
-        layers_info = [('Input\n(8 features)', 1, '#E3F2FD'), (f'Dense\n({self.config["hidden_dim"]} units)', 3, '#BBDEFB'), (f'Dropout\n({self.config["dropout_rate"]})', 4, '#90CAF9'), (f'Bottleneck\n({self.config["bottleneck_dim"]} units)', 5, '#64B5F6'), (f'Dense\n({self.config["hidden_dim"]} units)', 6, '#BBDEFB'), (f'Dropout\n({self.config["dropout_rate"]})', 7, '#90CAF9'), ('Output\n(8 features)', 9, '#E3F2FD')]
+        layers_info = [('Input\n(16 features)', 1, '#E3F2FD'), (f'Dense\n({self.config["hidden_dim"]} units)', 3, '#BBDEFB'), (f'Dropout\n({self.config["dropout_rate"]})', 4, '#90CAF9'), (f'Bottleneck\n({self.config["bottleneck_dim"]} units)', 5, '#64B5F6'), (f'Dense\n({self.config["hidden_dim"]} units)', 6, '#BBDEFB'), (f'Dropout\n({self.config["dropout_rate"]})', 7, '#90CAF9'), ('Output\n(16 features)', 9, '#E3F2FD')]
         for i, (name, y, color) in enumerate(layers_info):
             rect = plt.Rectangle((3, y-0.4), 4, 0.8, facecolor=color, edgecolor='black', linewidth=2)
             axes[0].add_patch(rect)
@@ -527,9 +546,9 @@ with gr.Blocks(title="Sound Model Trainer") as demo:
             batch_size_input = gr.Slider(16, 64, value=32, step=8, label="Batch Size")
         with gr.Row():
             threshold_input = gr.Slider(90, 99, value=95, step=1, label="Threshold %")
-            bottleneck_input = gr.Slider(2, 6, value=3, step=1, label="Bottleneck Dim")
+            bottleneck_input = gr.Slider(3, 8, value=6, step=1, label="Bottleneck Dim")
         with gr.Row():
-            hidden_input = gr.Slider(4, 10, value=6, step=2, label="Hidden Dim")
+            hidden_input = gr.Slider(6, 16, value=12, step=2, label="Hidden Dim")
             dropout_input = gr.Slider(0, 0.3, value=0.1, step=0.05, label="Dropout")
         with gr.Row():
             lr_input = gr.Number(value=0.001, label="Learning Rate")
